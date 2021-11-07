@@ -1,6 +1,8 @@
 # File name          : psLDAPmonitor.ps1
 # Author             : Podalirius (@podalirius_)
 # Date created       : 17 Oct 2021
+# Updated by	     : 1nTh35h311 (@yossi_sassi)
+# Date updated       : 7 Nov 2021
 
 Param (
     [parameter(Mandatory=$true)][string]$dcip = $null,
@@ -16,9 +18,9 @@ Param (
 )
 
 If ($Help) {
-    Write-Host "[+]======================================================"
-    Write-Host "[+] Powershell LDAP live monitor v1.1      @podalirius_  "
-    Write-Host "[+]======================================================"
+    Write-Host "[+]================================================================================"
+    Write-Host "[+] Powershell LDAP live monitor v1.1b      @podalirius_ (updated by @yossi_sassi) "
+    Write-Host "[+]================================================================================"
     Write-Host ""
 
     Write-Host "Required arguments:"
@@ -146,12 +148,29 @@ Function ResultsDiff {
 
             # Show results
             if ($attrs_diff.Length -ge 0) {
-                Write-Logger -Logfile $Logfile -Message  ("{0}{1}" -f $dateprompt, $path.replace($connectionString+"/",""))
+                # added samaccountname, indicates better if computer or user
+                Write-Logger -Logfile $Logfile -Message  ("{0}{1}{2}" -f $dateprompt, $path.replace($connectionString+"/",""), " ($($dict_results_after[$path].samaccountname))")
 
                 Foreach ($t in $attrs_diff) {
-                    if (($t[3] -ne $null) -And ($t[2] -ne $null)) {
-                        Write-Logger -Logfile $Logfile -Message  (" | Attribute {0} changed from '{1}' to '{2}'" -f $t[1], $t[3], $t[2]);
-                    } elseif (($t[3] -eq $null) -And ($t[2] -ne $null)) {
+                if (($t[3] -ne $null) -And ($t[2] -ne $null)) {
+			    # updated to include parsing dateTime fields (filetime) to friendly format
+			    if ($t[1] -in $DateAttributes) {
+					    $PreviousDateTime = [datetime]::fromFileTime($($t[3])); 
+					    $NewDateTime = [datetime]::fromFileTime($($t[2])); 
+	                	            Write-Logger -Logfile $Logfile -Message  (" | Attribute {0} changed from '{1}' to '{2}'" -f $t[1], $PreviousDateTime, $NewDateTime);
+				    }
+			    else
+				    {
+					    if ($t[1] -eq "badpwdcount") 
+						    {
+						            Write-Logger -Logfile $Logfile -Message  (" | Attribute {0} changed from '{1}' to '{2}' (Lockout at $LockOutBadCount bad counts)" -f $t[1], $t[3], $t[2]);
+						    }
+					    else
+						    {
+							    Write-Logger -Logfile $Logfile -Message  (" | Attribute {0} changed from '{1}' to '{2}'" -f $t[1], $t[3], $t[2]);
+						    }
+				    }
+	            } elseif (($t[3] -eq $null) -And ($t[2] -ne $null)) {
                         Write-Logger -Logfile $Logfile -Message  (" | Attribute {0} = '{1}' was created." -f $t[1], $t[2]);
                     } elseif (($t[3] -ne $null) -And ($t[2] -eq $null)) {
                         Write-Logger -Logfile $Logfile -Message  (" | Attribute {0} = '{1}' was deleted." -f $t[1], $t[3]);
@@ -164,10 +183,17 @@ Function ResultsDiff {
 
 #===============================================================================
 
-Write-Logger -Logfile $Logfile -Message  "[+]======================================================"
-Write-Logger -Logfile $Logfile -Message  "[+] Powershell LDAP live monitor v1.1      @podalirius_  "
-Write-Logger -Logfile $Logfile -Message  "[+]======================================================"
+Write-Logger -Logfile $Logfile -Message  "[+]================================================================================"
+Write-Logger -Logfile $Logfile -Message  "[+] Powershell LDAP live monitor v1.1b      @podalirius_ (updated by @yossi_sassi) "
+Write-Logger -Logfile $Logfile -Message  "[+]================================================================================"
 Write-Logger -Logfile $Logfile -Message  ""
+
+# pick up default logon server IPv4 if not specified
+if ($dcip = $null -and $env:LOGONSERVER) {
+        $DCIPs = ([system.net.dns]::Resolve($($env:LOGONSERVER).Replace("\\",""))).AddressList.IPAddressToString;
+        $dcip = $DCIPs | foreach {if ($_ -match "^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$" -and [bool]($_ -as [ipaddress])) {$_}} | select -First 1;
+        Write-Verbose "No -dcip specified. automatically using current Logon Server (IP: $dcip)."
+    }
 
 # Handle LDAPS connection
 $connectionString = "LDAP://{0}:{1}";
@@ -197,11 +223,18 @@ try {
 
     Write-Verbose ("Authentication successful!");
 
+    
+    # update: set dateTime attributes for better formatting 
+    $DateAttributes = "lastlogon", "badpasswordtime", "lastlogontimestamp", "pwdlastset";
+
+    # update: include LockOut bad count limit, to reflect when bad password was attempted
+    [int]$LockOutBadCount = (Get-Content "\\$($ENV:USERDNSDOMAIN)\SYSVOL\$($ENV:USERDNSDOMAIN)\Policies\{31B2F340-016D-11D2-945F-00C04FB984F9}\MACHINE\Microsoft\Windows NT\SecEdit\GptTmpl.inf" | Select-String LockoutBadCount).ToString().Split("=")[1].Trim()
+
     # First query
     $searcher.Filter = "(objectClass=*)"
     $results_before = $searcher.FindAll();
 
-    Write-Logger -Logfile $Logfile -Message "[>] Listening for LDAP changes ...";
+    Write-Logger -Logfile $Logfile -Message "[>] Polling for LDAP changes (DC IP: $dcip)...";
     Write-Logger -Logfile $Logfile -Message "";
 
     While ($true) {
