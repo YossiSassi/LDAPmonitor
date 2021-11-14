@@ -5,7 +5,7 @@
 # Date updated       : 7 Nov 2021
 
 Param (
-    [parameter(Mandatory=$true)][string]$dcip = $null,
+    [parameter(Mandatory=$false)][string]$dcip = $null,
     [parameter(Mandatory=$false)][string]$Username = $null,
     [parameter(Mandatory=$false)][string]$Password = $null,
     [parameter(Mandatory=$false)][string]$LogFile = $null,
@@ -199,7 +199,7 @@ Write-Logger -Logfile $Logfile -Message  "[+]===================================
 Write-Logger -Logfile $Logfile -Message  ""
 
 # pick up default logon server IPv4 if not specified
-if ($dcip = $null -and $env:LOGONSERVER) {
+if ($dcip -eq "" -and $env:LOGONSERVER -ne "") {
         $DCIPs = ([system.net.dns]::Resolve($($env:LOGONSERVER).Replace("\\",""))).AddressList.IPAddressToString;
         $dcip = $DCIPs | foreach {if ($_ -match "^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$" -and [bool]($_ -as [ipaddress])) {$_}} | select -First 1;
         Write-Verbose "No -dcip specified. automatically using current Logon Server (IP: $dcip)."
