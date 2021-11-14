@@ -54,6 +54,15 @@ if ($Delay) {
 
 #===============================================================================
 
+$Global:Color = "Cyan";
+Function Invoke-ColorChange {
+	if ($Global:Color -eq "Yellow") {$Global:Color = "Cyan"}
+	else
+	{
+	$Global:Color = "Yellow";
+	}			
+}
+
 Function Write-Logger {
     [CmdletBinding()]
     [OutputType([Nullable])]
@@ -64,7 +73,7 @@ Function Write-Logger {
     )
     Begin
     {
-        Write-Host $Message
+	Write-Host $Message -Foregroundcolor $global:Color;
         If ($LogFile.Length -ne 0) {
             $Stream = [System.IO.StreamWriter]::new($LogFile, $true)
             $Stream.WriteLine($Message)
@@ -149,6 +158,7 @@ Function ResultsDiff {
             # Show results
             if ($attrs_diff.Length -ge 0) {
                 # added samaccountname, indicates better if computer or user
+		Invoke-ColorChange;
                 Write-Logger -Logfile $Logfile -Message  ("{0}{1}{2}" -f $dateprompt, $path.replace($connectionString+"/",""), " ($($dict_results_after[$path].samaccountname))")
 
                 Foreach ($t in $attrs_diff) {
