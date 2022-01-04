@@ -1,15 +1,15 @@
 # File name          : psLDAPmonitor.ps1
 # Author             : Podalirius (@podalirius_)
-# Date created       : 17 Oct 2021
 # Updated by	     : 1nTh35h311 (@yossi_sassi)
-# Date updated       : 7 Nov 2021
+# Date Updated       : 3 Jan 2022
 
 Param (
-    [parameter(Mandatory=$false)][string]$dcip = $null,
+    [parameter(Mandatory=$true)][string]$dcip = $null,
     [parameter(Mandatory=$false)][string]$Username = $null,
     [parameter(Mandatory=$false)][string]$Password = $null,
     [parameter(Mandatory=$false)][string]$LogFile = $null,
     [parameter(Mandatory=$false)][int]$PageSize = 5000,
+    [parameter(Mandatory=$false)][string]$SearchBase = $null,
     [parameter(Mandatory=$false)][int]$Delay = 1,
     [parameter(Mandatory=$false)][switch]$LDAPS,
     [parameter(Mandatory=$false)][switch]$Randomize,
@@ -18,9 +18,9 @@ Param (
 )
 
 If ($Help) {
-    Write-Host "[+]================================================================================"
-    Write-Host "[+] Powershell LDAP live monitor v1.1b      @podalirius_ (updated by @yossi_sassi) "
-    Write-Host "[+]================================================================================"
+    Write-Host "[+]======================================================================"              
+    Write-Host "[+] Powershell LDAP live monitor v1.3.1      @podalirius_   @yossi_sassi "              
+    Write-Host "[+]======================================================================"              
     Write-Host ""
 
     Write-Host "Required arguments:"
@@ -31,6 +31,7 @@ If ($Help) {
     Write-Host "  -Username   : User to authenticate as."
     Write-Host "  -Password   : Password for authentication."
     Write-Host "  -PageSize   : Sets the LDAP page size to use in queries (default: 5000)."
+    Write-Host "  -SearchBase : Sets the LDAP search base."
     Write-Host "  -LDAPS      : Use LDAPS instead of LDAP."
     Write-Host "  -LogFile    : Log file to save output to."
     Write-Host "  -Delay      : Delay between two queries in seconds (default: 1)."
@@ -73,7 +74,9 @@ Function Write-Logger {
     )
     Begin
     {
-	Write-Host $Message -Foregroundcolor $global:Color;
+	#YossiS:
+        Write-Host $Message -Foregroundcolor $global:Color;
+	#End-YossiS:
         If ($LogFile.Length -ne 0) {
             $Stream = [System.IO.StreamWriter]::new($LogFile, $true)
             $Stream.WriteLine($Message)
@@ -82,13 +85,96 @@ Function Write-Logger {
     }
 }
 
+Function Init-LdapConnection {
+    [CmdletBinding()]
+    [OutputType([Nullable])]
+    Param
+    (
+        [Parameter(Mandatory=$true)] $connectionString,
+        [Parameter(Mandatory=$false)] $SearchBase,
+        [Parameter(Mandatory=$false)] $Username,
+        [Parameter(Mandatory=$false)] $Password,
+        [Parameter(Mandatory=$false)] $PageSize
+    )
+    Begin
+    {
+        $ldapSearcher = New-Object System.DirectoryServices.DirectorySearcher
+        if ($Username) {
+            if ($SearchBase.Length -ne 0) {
+                # Connect to Domain with credentials
+                $ldapSearcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry(("{0}/{1}" -f $connectionString, $SearchBase), $Username, $Password)
+            } else {
+                # Connect to Domain with current session
+                $ldapSearcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry("$connectionString", $Username, $Password)
+            }
+        } else {
+            if ($SearchBase.Length -ne 0) {
+                # Connect to Domain with credentials
+                $ldapSearcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry(("{0}/{1}" -f $connectionString, $SearchBase))
+            } else {
+                # Connect to Domain with current session
+                $ldapSearcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry("$connectionString")
+            }
+        }
+        $ldapSearcher.SearchScope = "Subtree"
+        if ($PageSize) {
+            $ldapSearcher.PageSize = $PageSize
+        } else {
+            Write-Verbose ("Setting PageSize to $PageSize");
+            $ldapSearcher.PageSize = 5000
+        }
+        return $ldapSearcher;
+    }
+}
+
+
+Function Query-AllNamingContextsOrSearchBase {
+    [CmdletBinding()]
+    [OutputType([Nullable])]
+    Param
+    (
+        [Parameter(Mandatory=$true)] $namingContexts,
+        [Parameter(Mandatory=$true)] $connectionString,
+        [Parameter(Mandatory=$false)] $SearchBase,
+        [Parameter(Mandatory=$false)] $Username,
+        [Parameter(Mandatory=$false)] $Password,
+        [Parameter(Mandatory=$false)] $PageSize
+    )
+    Begin
+    {
+        if ($SearchBase.Length -ne 0) {
+            Write-Verbose "Using SearchBase: $nc"
+            $ldapSearcher = Init-LdapConnection -connectionString $connectionString -SearchBase $SearchBase -Username $Username -Password $Password -PageSize $PageSize
+            $ldapSearcher.Filter = "(objectClass=*)"
+            return $ldapSearcher.FindAll();
+        } else {
+            $results = [ordered]@{};
+            foreach ($nc in $namingContexts) {
+                Write-Verbose "Using namingContext as search base: $nc"
+                $ldapSearcher = Init-LdapConnection -connectionString $connectionString -SearchBase $nc -Username $Username -Password $Password -PageSize $PageSize
+                $ldapSearcher.Filter = "(objectClass=*)"
+
+                Foreach ($item in $ldapSearcher.FindAll()) {
+                    if (!($results.Keys -contains $item.Path)) {
+                        $results[$item.Path] = $item.Properties;
+                    } else {
+                        Write-Host "[debug] key already exists: $key (this shouldn't be possible)"
+                    }
+                }
+            }
+            return $results;
+        }
+    }
+}
+
+
 Function ResultsDiff {
     [CmdletBinding()]
     [OutputType([Nullable])]
     Param
     (
-        [Parameter(Mandatory=$true)] $Before,
-        [Parameter(Mandatory=$true)] $After,
+        [Parameter(Mandatory=$true)] $ResultsBefore,
+        [Parameter(Mandatory=$true)] $ResultsAfter,
         [Parameter(Mandatory=$true)] $connectionString,
         [Parameter(Mandatory=$true)] $Logfile,
         [parameter(Mandatory=$false)][switch]$IgnoreUserLogons
@@ -101,23 +187,18 @@ Function ResultsDiff {
         }
 
         $dateprompt = ("[{0}] " -f (Get-Date -Format "yyyy/MM/dd hh:mm:ss"));
-        # Get Keys
-        $dict_results_before = [ordered]@{};
-        $dict_results_after = [ordered]@{};
-        Foreach ($itemBefore in $Before) { $dict_results_before[$itemBefore.Path] = $itemBefore.Properties; }
-        Foreach ($itemAfter in $After) { $dict_results_after[$itemAfter.Path] = $itemAfter.Properties; }
 
         # Get created and deleted entries, and common_keys
         [System.Collections.ArrayList]$commonPaths = @();
-        Foreach ($bpath in $dict_results_before.Keys) {
-            if (!($dict_results_after.Keys -contains $bpath)) {
+        Foreach ($bpath in $ResultsBefore.Keys) {
+            if (!($ResultsAfter.Keys -contains $bpath)) {
                 Write-Logger -Logfile $Logfile -Message  ("{0}'{1}' was deleted." -f $dateprompt, $bpath.replace($connectionString+"/",""))
             } else {
                 $commonPaths.Add($bpath) | Out-Null
             }
         }
-        Foreach ($apath in $dict_results_after.Keys) {
-            if (!($dict_results_before.Keys -contains $apath)) {
+        Foreach ($apath in $ResultsAfter.Keys) {
+            if (!($ResultsBefore.Keys -contains $apath)) {
                 Write-Logger -Logfile $Logfile -Message  ("{0}'{1}' was created." -f $dateprompt, $apath.replace($connectionString+"/",""))
             }
         }
@@ -131,14 +212,14 @@ Function ResultsDiff {
             $dict_direntry_before = [ordered]@{};
             $dict_direntry_after = [ordered]@{};
 
-            Foreach ($propkey in $dict_results_before[$path].Keys) {
+            Foreach ($propkey in $ResultsBefore[$path].Keys) {
                 if (!($ignored_keys -Contains $propkey.ToLower())) {
-                    $dict_direntry_before.Add($propkey, $dict_results_before[$path][$propkey][0]);
+                    $dict_direntry_before.Add($propkey, $ResultsBefore[$path][$propkey][0]);
                 }
             };
-            Foreach ($propkey in $dict_results_after[$path].Keys) {
+            Foreach ($propkey in $ResultsAfter[$path].Keys) {
                 if (!($ignored_keys -Contains $propkey.ToLower())) {
-                    $dict_direntry_after.Add($propkey, $dict_results_after[$path][$propkey][0]);
+                    $dict_direntry_after.Add($propkey, $ResultsAfter[$path][$propkey][0]);
                 }
             };
 
@@ -157,9 +238,9 @@ Function ResultsDiff {
 
             # Show results
             if ($attrs_diff.Length -ge 0) {
-                # added samaccountname, indicates better if computer or user
-		Invoke-ColorChange;
-                Write-Logger -Logfile $Logfile -Message  ("{0}{1}{2}" -f $dateprompt, $path.replace($connectionString+"/",""), " ($($dict_results_after[$path].samaccountname))")
+                #YossiS: added samaccountname, indicates better if computer or user
+		        Invoke-ColorChange;
+                Write-Logger -Logfile $Logfile -Message  ("{0}{1}{2}" -f $dateprompt, $path.replace($connectionString+"/",""), " ($($dict_direntry_before.samaccountname))")
 
                 Foreach ($t in $attrs_diff) {
                 if (($t[3] -ne $null) -And ($t[2] -ne $null)) {
@@ -190,20 +271,23 @@ Function ResultsDiff {
         }
     }
 }
+#End-YossiS:
 
 #===============================================================================
 
-Write-Logger -Logfile $Logfile -Message  "[+]================================================================================"
-Write-Logger -Logfile $Logfile -Message  "[+] Powershell LDAP live monitor v1.1b      @podalirius_ (updated by @yossi_sassi) "
-Write-Logger -Logfile $Logfile -Message  "[+]================================================================================"
+Write-Logger -Logfile $Logfile -Message  "[+]===================================================================="
+Write-Logger -Logfile $Logfile -Message  "[+] Powershell LDAP live monitor v1.3.1      @podalirius_  @yossi_sassi"
+Write-Logger -Logfile $Logfile -Message  "[+]===================================================================="
 Write-Logger -Logfile $Logfile -Message  ""
 
+<#
 # pick up default logon server IPv4 if not specified
 if ($dcip -eq "" -and $env:LOGONSERVER -ne "") {
         $DCIPs = ([system.net.dns]::Resolve($($env:LOGONSERVER).Replace("\\",""))).AddressList.IPAddressToString;
         $dcip = $DCIPs | foreach {if ($_ -match "^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$" -and [bool]($_ -as [ipaddress])) {$_}} | select -First 1;
         Write-Verbose "No -dcip specified. automatically using current Logon Server (IP: $dcip)."
     }
+#>
 
 # Handle LDAPS connection
 $connectionString = "LDAP://{0}:{1}";
@@ -212,50 +296,40 @@ If ($LDAPS) {
 } else {
     $connectionString = ($connectionString -f $dcip, "389");
 }
-Write-Verbose "$connectionString"
+Write-Verbose "Using connectionString: $connectionString"
 
 # Connect to LDAP
 try {
-    # Connect to Domain with credentials
-    if ($Username) {
-        $objDomain = New-Object System.DirectoryServices.DirectoryEntry("$connectionString", $Username, $Password)
-    } else {
-        $objDomain = New-Object System.DirectoryServices.DirectoryEntry("$connectionString")
-    }
-    $searcher = New-Object System.DirectoryServices.DirectorySearcher
-    $searcher.SearchRoot = $objDomain
-    if ($PageSize) {
-        $searcher.PageSize = $PageSize
-    } else {
-        Write-Verbose ("Setting PageSize to $PageSize");
-        $searcher.PageSize = 5000
-    }
+    $rootDSE = New-Object System.DirectoryServices.DirectoryEntry("{0}/RootDSE" -f $connectionString);
+    $namingContexts = $rootDSE.Properties["namingContexts"];
 
     Write-Verbose ("Authentication successful!");
 
-    
+    #YossiS:
     # update: set dateTime attributes for better formatting 
     $DateAttributes = "lastlogon", "badpasswordtime", "lastlogontimestamp", "pwdlastset";
 
     # update: include LockOut bad count limit, to reflect when bad password was attempted
     [int]$LockOutBadCount = (Get-Content "\\$($ENV:USERDNSDOMAIN)\SYSVOL\$($ENV:USERDNSDOMAIN)\Policies\{31B2F340-016D-11D2-945F-00C04FB984F9}\MACHINE\Microsoft\Windows NT\SecEdit\GptTmpl.inf" | Select-String LockoutBadCount).ToString().Split("=")[1].Trim()
+    #End-YossiS:
 
     # First query
-    $searcher.Filter = "(objectClass=*)"
-    $results_before = $searcher.FindAll();
+    $results_before = Query-AllNamingContextsOrSearchBase -connectionString $connectionString -SearchBase $SearchBase -namingContexts $namingContexts -Username $Username -Password $Password -PageSize $PageSize
 
     Write-Logger -Logfile $Logfile -Message "[>] Polling for LDAP changes (DC IP: $dcip)...";
     Write-Logger -Logfile $Logfile -Message "";
 
     While ($true) {
         # Update query
-        $results_after = $searcher.FindAll();
+        $results_after = Query-AllNamingContextsOrSearchBase -connectionString $connectionString -SearchBase $SearchBase -namingContexts $namingContexts -Username $Username -Password $Password -PageSize $PageSize
+
         # Diff
         if ($IgnoreUserLogons) {
-            ResultsDiff -Before $results_before -After $results_after -connectionString $connectionString -Logfile $Logfile -IgnoreUserLogons
+            ResultsDiff -ResultsBefore $results_before -ResultsAfter $results_after -connectionString $connectionString -Logfile $Logfile -IgnoreUserLogons
         } else {
-            ResultsDiff -Before $results_before -After $results_after -connectionString $connectionString -Logfile $Logfile
+            ResultsDiff -ResultsBefore $results_before -ResultsAfter $results_after -connectionString $connectionString -Logfile $Logfile
         }
+
         $results_before = $results_after;
         if ($Randomize) {
             $DelayInSeconds = Get-Random -Minimum 1 -Maximum 5
